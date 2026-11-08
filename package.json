@@ -1,0 +1,10 @@
+{
+  "name": "crous-lille",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Surveille les logements CROUS disponibles à Lille et envoie une notification WhatsApp/Telegram.",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}
