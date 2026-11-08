@@ -39,6 +39,8 @@ const HEADERS = {
 const DELAI_REQUETE_MS = 7000; // la fonction gratuite est coupée à ~10 s
 const SEUIL_ALERTE_ERREURS = 6; // ~30 min d'échecs d'affilée avant de prévenir
 const MAX_LOGEMENTS_PAR_MESSAGE = 8;
+// Changer cette clé remet la surveillance à zéro (nouvelle confirmation envoyée).
+const CLE_ETAT = "etat-v2";
 
 // -----------------------------------------------------------------------------
 // Réseau
@@ -77,7 +79,7 @@ async function notifier(m) {
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
     console.error("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant dans les variables Netlify.");
-    return;
+    return false;
   }
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -90,9 +92,14 @@ async function notifier(m) {
         disable_web_page_preview: true,
       }),
     });
-    if (!r.ok) console.error("Erreur Telegram :", r.status, await r.text());
+    if (!r.ok) {
+      console.error("Erreur Telegram :", r.status, await r.text());
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error("Erreur Telegram :", e.message);
+    return false;
   }
 }
 
@@ -123,6 +130,19 @@ export async function phasesOuvertes(maintenant = new Date()) {
   if (!Array.isArray(liste) || !liste.length) {
     throw new Error("Liste des phases vide ou format inattendu");
   }
+
+  console.log(
+    `Phases publiées par le CROUS (${liste.length}) : ` +
+      liste
+        .map((t) => {
+          const dates = Object.entries(t || {})
+            .filter(([k, v]) => /start|begin|end|debut|fin|date/i.test(k) && v && typeof v !== "object")
+            .map(([k, v]) => `${k}=${v}`)
+            .join(" ");
+          return `[${t?.id}] ${t?.label || t?.name || "?"} ${dates}`;
+        })
+        .join(" | "),
+  );
 
   return liste
     .filter((t) => {
@@ -207,7 +227,7 @@ export function decrire(item, phase) {
 // -----------------------------------------------------------------------------
 export default async () => {
   const store = getStore("crous-lille");
-  const etat = (await store.get("etat", { type: "json" })) || {
+  const etat = (await store.get(CLE_ETAT, { type: "json" })) || {
     initialise: false,
     vus: [],
     erreurs: 0,
@@ -240,9 +260,14 @@ export default async () => {
       });
       etat.alerteEnvoyee = true;
     }
-    await store.setJSON("etat", etat);
+    await store.setJSON(CLE_ETAT, etat);
     return new Response("erreur", { status: 500 });
   }
+
+  console.log(
+    `Phases surveillées : ${phases.map((p) => `[${p.id}] ${p.nom}`).join(", ") || "AUCUNE"} — ` +
+      resultats.map(({ phase, items }) => `phase ${phase.id} : ${items.length} logement(s)`).join(", "),
+  );
 
   if (etat.alerteEnvoyee) {
     await notifier({ titre: "✅ La surveillance CROUS fonctionne de nouveau." });
@@ -266,7 +291,7 @@ export default async () => {
 
   if (!etat.initialise) {
     // Premier passage : on mémorise l'existant et on envoie UNE confirmation.
-    await notifier({
+    const envoye = await notifier({
       titre: "✅ Surveillance CROUS Lille activée",
       blocs: [
         {
@@ -279,7 +304,9 @@ export default async () => {
       ],
       fin: "Vous recevrez un message à chaque nouveau logement.",
     });
-    etat.initialise = true;
+    // Si Telegram n'a pas pu être joint, on réessaiera au prochain passage.
+    etat.initialise = envoye;
+    if (!envoye) vus.clear();
   } else if (nouveaux.length) {
     // Les nouveaux logements sont regroupés (8 max par message) pour éviter
     // un message trop long ou une rafale de notifications.
@@ -294,7 +321,7 @@ export default async () => {
   }
 
   etat.vus = [...vus].slice(-5000);
-  await store.setJSON("etat", etat);
+  await store.setJSON(CLE_ETAT, etat);
 
   console.log(`OK — ${totalEnLigne} en ligne, ${nouveaux.length} nouveau(x).`);
   return new Response("ok");
